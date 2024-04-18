@@ -2,14 +2,16 @@
 /**
  *  Expands the GP API by adding extended Translation endpoints.
  *  Ultimate goal here being inclusion in the appropriate parts of GP core.
- *
- *  Put this file in the folder: /glotpress/plugins/
  */
 
 
 class GP_Route_Translation_Extended extends GP_Route_Main {
 
 	function __construct() {
+		// Add CORS headers
+		header( 'Access-Control-Allow-Origin: https://wenpai.org' );
+		header( 'Access-Control-Allow-Methods: POST, GET, OPTIONS, DELETE, PUT' );
+		header( 'Access-Control-Allow-Credentials: true' );
 		$this->template_path = dirname( __FILE__ ) . '/templates/';
 	}
 
@@ -81,87 +83,46 @@ class GP_Route_Translation_Extended extends GP_Route_Main {
 			$this->die_with_error( __( "Yer not 'spose ta be here." ), 403 );
 		}
 
-		$project_path          = gp_post( 'project' );
-		$locale_slug           = gp_post( 'locale_slug' );
-		$translation_set_slug  = gp_post( 'translation_set_slug', 'default' );
-		$original_strings      = gp_post( 'original_strings', array() );
+		$project_path         = gp_post( 'project' );
+		$locale_slug          = gp_post( 'locale_slug' );
+		$translation_set_slug = gp_post( 'translation_set_slug', 'default' );
+		//$original_strings     = json_decode( gp_post( 'original_strings', true ) );
+		$original_ids = json_decode( gp_post( 'original_ids', true ) );
 
-		if ( ! $project_path || ! $locale_slug || ! $translation_set_slug || ! $original_strings ) {
+		if ( ! $project_path || ! $locale_slug || ! $translation_set_slug || ! $original_ids ) {
 			$this->die_with_404();
 		}
 
-		$original_strings      = json_decode( $original_strings );
+		$project         = GP::$project->by_path( $project_path );
+		$translation_set = GP::$translation_set->by_project_id_slug_and_locale( $project->id, $translation_set_slug, $locale_slug );
 
-		$project_paths = $translation_sets = array();
-		foreach ( explode( ',', $project_path ) as $project_path ) {
-
-			$project = GP::$project->by_path( $project_path );
-			if ( ! $project ) {
-				continue;
-			}
-
-			$translation_set = GP::$translation_set->by_project_id_slug_and_locale( $project->id, $translation_set_slug, $locale_slug );
-			if ( ! $translation_set ) {
-				continue;
-			}
-
-			$project_paths[ $project->id ] = $project_path;
-			$translation_sets[ $project->id ] = $translation_set;
-		}
-
-		if ( empty( $translation_sets ) ) {
+		if ( ! $project || ! $translation_set ) {
 			$this->die_with_404();
 		}
 
-		$checked_originals = array();
-		foreach ( $original_strings as $original ) {
-			if ( empty( $original ) || ! property_exists( $original, 'singular' ) ) {
+		foreach ( $original_ids as $original_id ) {
+			//$original_record = GP::$original->by_project_id_and_entry( $project->id, $original );
+			$original_record = GP::$original->find_one( array( 'id' => $original_id ) );
+			if ( ! $original_record ) {
+				$translations['originals_not_found'][] = $original_id;
 				continue;
 			}
-			$contexts = array( false );
-			if ( property_exists( $original, 'context' )  && $original->context ) {
-				if ( is_array( $original->context ) ) {
-					$contexts = $original->context;
-				} else {
-					$contexts = array( $original->context );
-				}
+			$query_result                   = new stdClass();
+			$query_result->original_id      = $original_record->id;
+			$query_result->original         = $original_record->singular;
+			$query_result->original_comment = $original_record->comment;
+
+			$query_result->translations = GP::$translation->find_many( "original_id = '{$query_result->original_id}' AND translation_set_id = '{$translation_set->id}' AND ( status = 'waiting' OR status = 'fuzzy' OR status = 'current' )" );
+
+			foreach ( $query_result->translations as $key => $current_translation ) {
+				$query_result->translations[ $key ]                   = GP::$translation->prepare_fields_for_save( $current_translation );
+				$query_result->translations[ $key ]['translation_id'] = $current_translation->id;
 			}
 
-			foreach ( $contexts as $context ) {
-				$key = $original->singular;
-				if ( $context ) {
-					$original->context = $context;
-					$key = $original->context . '\u0004' . $key;
-				} else {
-					unset( $original->context );
-				}
-
-				if ( isset( $checked_originals[ $key ] ) ) {
-					continue;
-				}
-				$checked_originals[ $key ] = true;
-
-				foreach ( $translation_sets as $project_id => $translation_set ) {
-					$original_record = $this->by_project_id_and_entry( $project_id, $original );
-					if ( ! $original_record ) {
-						continue;
-					}
-
-					$query_result                    = new stdClass();
-					$query_result->original_id       = $original_record->id;
-					$query_result->original          = $original;
-					$query_result->original_comment  = $original_record->comment;
-					$query_result->project           = $project_paths[ $project_id ];
-
-					$query_result->translations  = GP::$translation->find_many_no_map( "original_id = '{$query_result->original_id}' AND translation_set_id = '{$translation_set->id}' AND ( status = 'waiting' OR status = 'fuzzy' OR status = 'current' )" );
-
-					$translations[] = $query_result;
-					continue 2;
-				}
-
-				$translations[ 'originals_not_found' ][] = $original;
-			}
+			$translations[] = $query_result;
 		}
+
+
 		$this->tmpl( 'translations-extended', get_defined_vars(), true );
 	}
 
@@ -172,51 +133,39 @@ class GP_Route_Translation_Extended extends GP_Route_Main {
 
 		$this->logged_in_or_forbidden();
 
-		$project_paths         = gp_post( 'project' );
-		$locale_slug           = gp_post( 'locale_slug' );
-		$translation_set_slug  = gp_post( 'translation_set_slug', 'default' );
+		$project_path         = gp_post( 'project' );
+		$locale_slug          = gp_post( 'locale_slug' );
+		$translation_set_slug = gp_post( 'transla tion_set_slug', 'default' );
 
-		if ( ! $project_paths || ! $locale_slug || ! $translation_set_slug ) {
+		if ( ! $project_path || ! $locale_slug || ! $translation_set_slug ) {
 			$this->die_with_404();
 		}
 
-		$project_ids = array_map( function( $project_path ) {
-			return GP::$project->by_path( $project_path )->id;
-		}, explode( ',', $project_paths ) );
-
-		if ( empty( $project_ids ) ) {
+		$project = GP::$project->by_path( $project_path );
+		$locale  = GP_Locales::by_slug( $locale_slug );
+		if ( ! $project || ! $locale ) {
 			$this->die_with_404();
 		}
 
-
-		$locale = GP_Locales::by_slug( $locale_slug );
-		if ( ! $locale ) {
+		$translation_set = GP::$translation_set->by_project_id_slug_and_locale( $project->id, $translation_set_slug, $locale_slug );
+		if ( ! $translation_set ) {
 			$this->die_with_404();
 		}
 
-		$output = array();
-		foreach( gp_post( 'translation', array() ) as $original_id => $translations ) {
-
-			$original = GP::$original->get( $original_id );
-			if ( ! $original || ! in_array( $original->project_id, $project_ids ) ) {
-				$this->die_with_404();
-			}
-
-			$project = GP::$project->get( $original->project_id );
-
-			$translation_set = GP::$translation_set->by_project_id_slug_and_locale( $original->project_id, $translation_set_slug, $locale_slug );
-			if ( ! $translation_set ) {
-				$this->die_with_404();
-			}
-
-			$data = compact('original_id');
-			$data['user_id'] = get_current_user_id();
+		$output      = array();
+		$translation = json_decode( gp_post( 'translation', array() ) );
+		foreach ( $translation as $original_id => $translations ) {
+			$data                       = compact( 'original_id' );
+			$data['user_id']            = get_current_user_id();
 			$data['translation_set_id'] = $translation_set->id;
 
-			foreach( range( 0, GP::$translation->get_static( 'number_of_plural_translations' ) ) as $i ) {
-				if ( isset( $translations[$i] ) ) $data["translation_$i"] = $translations[$i];
+			foreach ( range( 0, GP::$translation->get_static( 'number_of_plural_translations' ) ) as $i ) {
+				if ( isset( $translations[ $i ] ) ) {
+					$data["translation_$i"] = $translations[ $i ];
+				}
 			}
 
+			$original         = GP::$original->get( $original_id );
 			$data['warnings'] = GP::$translation_warnings->check( $original->singular, $original->plural, $translations, $locale );
 
 			if ( empty( $data['warnings'] ) && ( $this->can( 'approve', 'translation-set', $translation_set->id ) || $this->can( 'write', 'project', $project->id ) ) ) {
@@ -225,8 +174,11 @@ class GP_Route_Translation_Extended extends GP_Route_Main {
 				$data['status'] = 'waiting';
 			}
 
-			$existing_translations = GP::$translation->for_translation( $project, $translation_set, 'no-limit', array('original_id' => $original_id, 'status' => 'current_or_waiting' ), array() );
-			foreach( $existing_translations as $e ) {
+			$existing_translations = GP::$translation->for_translation( $project, $translation_set, 'no-limit', array(
+				'original_id' => $original_id,
+				'status'      => 'current_or_waiting'
+			), array() );
+			foreach ( $existing_translations as $e ) {
 				if ( array_pad( $translations, $locale->nplurals, null ) == $e->translations ) {
 					return $this->die_with_error( __( 'Identical current or waiting translation already exists.' ), 409 );
 				}
@@ -239,19 +191,18 @@ class GP_Route_Translation_Extended extends GP_Route_Main {
 				$this->die_with_error( $error_output, 422 );
 			}
 
-			do_action( 'gp_extended_api_save', $project, $locale, $translation );
-
 			if ( 'current' == $data['status'] ) {
 				$translation->set_status( 'current' );
 			}
 
 			gp_clean_translation_set_cache( $translation_set->id );
-			$translations = GP::$translation->find_many_no_map( "original_id = '{$original_id}' AND translation_set_id = '{$translation_set->id}' AND ( status = 'waiting' OR status = 'fuzzy' OR status = 'current' )" );
+			$translations = GP::$translation->for_translation( $project, $translation_set, 'no-limit', array( 'translation_id' => $translation->id ), array() );
+
 			if ( ! $translations ) {
-				$output[$original_id] = false;
+				$output[ $original_id ] = false;
 			}
 
-			$output[$original_id] = $translations;
+			$output[ $original_id ] = $translations[0];
 		}
 
 		$translations = $output;

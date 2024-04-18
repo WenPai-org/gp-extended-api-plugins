@@ -1,2 +1,3 @@
 <?php
-	echo json_encode( $translations );
+defined( 'ABSPATH' ) || exit;
+echo json_encode( $translations );
